@@ -28,6 +28,24 @@ This proposal covers only:
 
 It does not expose arbitrary RPC methods through GET, cache tool execution, or define content caching for `resources/read`. Per-primitive digests protect definition-dependent execution; HTTP ETags validate a list-page representation. These are independent mechanisms.
 
+### Protocol cache identity versus HTTP validators
+
+These mechanisms identify different things:
+
+| Mechanism | Identifies |
+| --- | --- |
+| Protocol cache key | A logical list result: server, method, parameters/cursor, authorization context, and other supported result-affecting context. |
+| HTTP cache key | A request's method and target URI, with representation variants selected through `Vary`. |
+| HTTP ETag | A version of the selected HTTP representation; it is a validator, not a cache key. |
+
+A protocol-level list key that changes when list contents change is better described as a list validator. It is not automatically an HTTP ETag: an HTTP page representation may include pagination, metadata, or negotiated differences outside that validator's coverage. Reusing a protocol validator as an ETag requires explicitly defining its coverage and satisfying HTTP validator semantics.
+
+The per-primitive digest companion defines neither an aggregate list validator nor an HTTP page ETag. Its definition validators remain independent of both cache-key mechanisms.
+
+GET is needed here for integration with ordinary HTTP caching infrastructure, not for protocol-level caching itself. MCP-level caching already works over POST and STDIO; a separate protocol-level conditional-list mechanism could also work over those transports without GET.
+
+The Server Card is peripheral: it is one possible discovery location for this optional HTTP mapping, not a cache key, a validator, or a dependency of the caching design.
+
 ## Candidate design
 
 ### 1. Keep the MCP endpoint; add a GET representation selector
