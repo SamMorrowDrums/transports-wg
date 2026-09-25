@@ -1,104 +1,195 @@
-# SEP-XXXX: Per-Primitive Digests and Conditional Requests
+# SEP-XXXX: Definition Versions
 
-- **Status**: Draft (working-group companion)
+- **Status**: Draft (discussion; not an accepted protocol change)
 - **Type**: Standards Track
 - **Created**: 2026-09-04
 - **Author(s)**: TBD
 - **Sponsor**: None
-- **Related**: [PR #45](https://github.com/modelcontextprotocol/transports-wg/pull/45), [SEP-2549](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2549) (TTL caching)
+- **Related**: [PR #45](https://github.com/modelcontextprotocol/transports-wg/pull/45), [SEP-2549](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2549), [HTTP list retrieval and caching](XXXX-http-list-retrieval-and-caching.md)
 
 ## Abstract
 
-Deployments can change primitive definitions while clients still hold valid cached lists, causing requests to use an outdated contract. Servers may optionally advertise deterministic per-primitive digests, and clients may return them to require execution against the corresponding definition or rejection before execution. This opt-in mechanism supplements existing TTL caching without requiring subscriptions, HTTP caching, or additional capability negotiation.
+This SEP lets servers label their tool, prompt, resource, and resource template lists, and their instructions, with a version string. Clients can send back the versions they are working from, and a server can use them to reject a request made against definitions that have since changed.
 
-This proposal does not yet define GET retrieval semantics for integration with standard HTTP ETag caching infrastructure. The original proposal describes `ETag` / `If-None-Match` revalidation with `304 Not Modified`, but does not define GET endpoints for list retrieval; that transport mapping remains separate work.
+The mechanism is advisory. Servers choose whether to advertise versions and whether to check them. Clients choose whether to send them. There is no capability negotiation, no per-primitive versioning, and no HTTP mapping.
 
 ## Motivation
 
-TTL is a freshness hint, not a promise that definitions will remain unchanged until expiry. A request-time precondition closes that gap without requiring a persistent notification stream. Definition changes may result from deployments, permission changes, or feature flags. This companion simplifies the [original proposal](XXXX-deterministic-primitive-surface-digest.md) while retaining per-primitive digests and making the supplied precondition enforceable.
+A client that caches `tools/list` according to its `ttlMs` can keep calling tools after the server has changed them. The TTL is a freshness hint, not a promise that nothing will change before it expires. Definitions change for many reasons: a deployment, a permission change, a feature flag, or a user editing their settings. When this happens, the model may be working from a stale description, schema, or set of instructions.
+
+Sometimes ordinary validation catches the problem, for example when a required argument was added. Often it does not. A tool whose description changed, or whose behavior now depends on different instructions, can accept the old arguments and do something the model did not intend.
+
+List-change notifications help, but they need a stream the client may not hold, and they arrive asynchronously. Definition versions give clients a cheap way to ask "has anything changed?" and give servers a way to say "yes, refresh first" before doing any work.
 
 ## Specification
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to be interpreted as described in [BCP 14](https://www.rfc-editor.org/info/bcp14).
 
-### Optional adoption
+### `DefinitionVersions`
 
-Servers **MAY** implement this mechanism and **MAY** emit digests for some or all of the primitives they expose. Clients **MAY** ignore digests and continue using ordinary requests and existing TTL caching. Neither side is required to opt in, and digest absence does not disable caching.
+```ts
+export interface DefinitionVersions {
+  tools?: string;
+  prompts?: string;
+  resources?: string;
+  resourceTemplates?: string;
+  instructions?: string;
+}
+```
 
-Emitting a digest advertises support for conditional requests using that primitive; no separate capability flag is needed. A server emitting digests **MUST** implement the conditional-request rules below, including rejection of unknown or no-longer-supported digests. These guarantees apply at the addressed server endpoint, not just the replica that returned the list.
+Each collection version identifies the complete set of definitions the caller can see, not a single page. The `resources` and `resourceTemplates` versions cover descriptors, not resource contents. The `instructions` version identifies the exact instructions text; absent instructions and empty instructions have different versions. An omitted field makes no claim about that collection.
 
-Unless stated otherwise, the requirements below apply when a server implements this mechanism or a client elects to use it. They do not require adoption.
+A version **MUST** be deterministic and collision-resistant. Adding, removing, or changing a definition changes the version. Ordering, page size, cursors, and TTL do not. An empty collection still has a version.
 
-### Per-primitive digest
+Clients **MUST** treat versions as opaque strings and compare them only for equality.
 
-A server opting in **MAY** include `io.modelcontextprotocol/digest`, a string, in a primitive object's own `_meta` in successful, complete list results:
+The exact canonicalization and the definition fields a version covers are not yet specified (see [Open Questions](#open-questions)).
 
-| List method | Object carrying the digest | Conditional operation |
-| --- | --- | --- |
-| `tools/list` | `Tool` | `tools/call` |
-| `prompts/list` | `Prompt` | `prompts/get` |
-| `resources/list` | `Resource` | `resources/read` |
-| `resources/templates/list` | `ResourceTemplate` | `resources/read` for a URI instantiated from that template |
+### Where versions appear
 
-The digest **MUST** identify that primitive's caller-visible definition, including schemas, annotations, and other definition fields, **excluding the primitive object's top-level `_meta`**. It identifies the definition, not tool output, rendered prompt content, or resource contents. Changes solely within the excluded `_meta` do not change the digest.
+`server/discover` **MAY** advertise versions for any collection and for the instructions it returns. Each list response **MAY** carry the version of its collection. A server **MUST** compute versions in discovery using the same authorization and tool-selection context it uses for listing, so that the two agree.
 
-The digest **MUST** be deterministic and collision-resistant: identical definitions across replicas produce the same digest, and changed definitions produce a different digest except for a cryptographic hash collision. It **MUST NOT** depend on list ordering, pagination, TTLs, cursors, or unrelated primitives.
+This SEP proposes one of two locations for the field. Only one will be standardized.
 
-Servers **SHOULD** compute it as `sha256:` followed by the lowercase hexadecimal SHA-256 hash of the [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) canonical JSON encoding of the primitive object with its top-level `_meta` removed. Servers **MAY** use another computation satisfying the same requirements. Clients **MUST** treat the value as opaque and compare only for equality; they do not compute or parse it.
+#### Option A: result `_meta`
 
-Clients choosing to use a digest **MUST** retain it with the cached definition it identifies, not adopt a new digest without the corresponding definition. An empty list carries no primitive digest; no aggregate list digest is introduced.
+A typed key is added to `ResultMetaObject`:
 
-### Conditional requests
+```ts
+export interface ResultMetaObject extends MetaObject {
+  // Existing fields unchanged.
+  "io.modelcontextprotocol/definitionVersions"?: DefinitionVersions;
+}
+```
 
-A client that received a digest for a primitive **MAY** include it as `io.modelcontextprotocol/expectedDigest`, a string, in the request `_meta` of the conditional operations above. Receiving a digest does not oblige the client to send it. It is the digest of the particular definition the client used, not a digest of the containing list.
+```json
+{
+  "resultType": "complete",
+  "tools": [],
+  "ttlMs": 60000,
+  "cacheScope": "private",
+  "_meta": {
+    "io.modelcontextprotocol/definitionVersions": {
+      "tools": "sha256:..."
+    }
+  }
+}
+```
 
-For `resources/read`, the supplied digest refers either to the listed resource descriptor or to the resource template used to construct the requested URI. The server **MUST** verify that the identified descriptor or template applies to that URI; a matching digest for an unrelated primitive does not satisfy the precondition.
+This fits an experimental extension and works with existing metadata handling. The `io.modelcontextprotocol/` key is proposed, not allocated.
 
-After ordinary request-envelope and authorization checks, a server implementing this mechanism and receiving `expectedDigest` **MUST** either:
+#### Option B: a `CacheableResult` field
 
-1. Handle the request according to the applicable primitive definition identified by the supplied digest; or
-2. Reject the request with `DigestChangedError` **before executing the operation**.
+```ts
+export interface CacheableResult extends Result {
+  ttlMs: number;
+  cacheScope: "public" | "private";
+  definitionVersions?: DefinitionVersions;
+}
+```
 
-The server **MUST** resolve the digest before validating operation-specific inputs against the selected definition, so schema drift is not mistaken for invalid arguments against a different definition.
+```json
+{
+  "resultType": "complete",
+  "supportedVersions": ["2026-07-28"],
+  "capabilities": { "tools": {} },
+  "instructions": "Search before creating a repository.",
+  "ttlMs": 60000,
+  "cacheScope": "private",
+  "definitionVersions": {
+    "tools": "sha256:...",
+    "instructions": "sha256:..."
+  }
+}
+```
 
-How the server honors a digest is implementation-defined. Retaining older definitions is not required: a server **MAY** accept only the target primitive's current digest. An unknown, inapplicable, or no-longer-supported digest **MUST** produce `DigestChangedError`, not execution followed by a warning. Ordinary validation and authorization errors remain available.
+This makes versions a first-class protocol field next to the existing freshness and sharing hints. The field identifies definitions, not the result that carries it. `resources/read` also returns a `CacheableResult`, but this SEP does not define a content version for it, and servers omit the field there.
 
-Requests without the field retain ordinary MCP behavior, even when the server advertised a digest. A client **MUST NOT** assume conditional enforcement for a primitive whose digest the server has not advertised. Servers that do not implement this mechanism may ignore the metadata under existing MCP rules.
+### Using versions on the client
 
-### Refresh-required error
+Clients **MUST** keep each version with the definitions it describes. Seeing a newer version in discovery does not relabel definitions that are already cached; it tells the client they are out of date.
 
-`DigestChangedError` is a JSON-RPC error, not a tool result with `isError: true`. Its response `id` **MUST** match the request, and its error code **MUST** be `DIGEST_CHANGED`. No method-specific error data is required: the error instructs the client to refresh, not to adopt a replacement digest in isolation.
+When assembling a collection from several pages, a client **MUST NOT** combine pages that report different versions. It restarts from the first page instead. To make a consistent listing possible, a server can keep a snapshot for the duration of pagination or reject stale cursors.
 
-> **Allocation pending:** `DIGEST_CHANGED` needs a code from MCP's protocol-defined error range before this proposal is finalized. No numeric allocation is asserted by this draft.
+### Sending known versions
 
-Over Streamable HTTP, the server **MUST** return this rejection as HTTP `409 Conflict` with an `application/json` JSON-RPC error body. On stdio, it uses the same JSON-RPC error without an HTTP status. This defines an error mapping, not HTTP caching or conditional-header semantics.
+A client **MAY** send the versions it is working from in request `_meta`. The request shape is the same under either response option:
 
-A client receiving this error **MUST** refresh the affected definition through its list method before retrying the rejected operation. It **SHOULD** reconsider the request against the refreshed definition and bound refresh/retry attempts. A retry **MUST** use a new JSON-RPC request ID. It **MUST NOT** automatically drop the digest to bypass the rejection.
+```ts
+export interface RequestMetaObject extends MetaObject {
+  // Existing fields unchanged.
+  "io.modelcontextprotocol/knownDefinitionVersions"?: DefinitionVersions;
+}
+```
+
+For example, the parameters of a `tools/call` request might look like this (other required `_meta` fields are omitted):
+
+```json
+{
+  "name": "search",
+  "arguments": { "query": "datasets" },
+  "_meta": {
+    "io.modelcontextprotocol/knownDefinitionVersions": {
+      "tools": "sha256:...",
+      "instructions": "sha256:..."
+    }
+  }
+}
+```
+
+Known versions are hints, not preconditions. A server **MAY** check the relevant versions on `tools/call`, `prompts/get`, or `resources/read`, or **MAY** ignore them. The instructions version is relevant to any of these operations. No capability flag is required.
+
+### Rejecting stale requests
+
+A server that rejects a request because of a version mismatch **MUST** do so before operation-specific validation and before execution. That way a changed schema is reported as a stale definition, not as invalid arguments, and no side effects occur.
+
+The rejection is a JSON-RPC error. A standard error code needs to be allocated before this SEP is finalized; this draft does not propose a numeric code or an HTTP status.
+
+A client receiving this error **SHOULD** refresh the affected definitions and then decide whether the operation still makes sense. It **SHOULD NOT** blindly retry writes, and it **MUST NOT** copy a new version into its request without also fetching the definitions that version describes.
 
 ### TTL and cache scope
 
-Existing [TTL and cache-scope rules](https://modelcontextprotocol.io/specification/draft/server/utilities/caching) remain unchanged. A digest rejection requires refresh before retrying even when the cached list's TTL has not expired; successful conditional execution **MUST NOT** extend that TTL. Each digest follows its containing list result's cache scope, including restrictions on sharing private results across authorization contexts.
+Definition versions do not change TTL or cache scope. A version does not renew a TTL, is not part of the cache key, and is not an HTTP ETag. An unexpired TTL still does not guarantee that definitions are unchanged.
 
 ## Rationale
 
-Per-primitive digests keep conditional requests independent of unrelated definition changes and list pagination. They do not detect newly added primitives; list freshness remains governed by TTL and optional change notifications. The digest travels in JSON-RPC metadata, so neither HTTP caching nor new headers are needed.
+**Collection versions instead of per-primitive versions.** An earlier draft attached a digest to every primitive and made the check mandatory. That design could not detect newly added primitives, and it required every replica behind an endpoint to honor any digest the server had advertised. One version per collection is simpler to compute and compare. It also covers additions and removals. The cost is coarseness: any change to a collection invalidates requests against it, even if the specific tool the client wants is unchanged.
 
-Server routing, connection draining, and support for older primitive versions are implementation choices, not protocol requirements. A participating server can always reject a digest it cannot honor. This proposal does not add response-side digests to operation results, HTTP validators, or resource-content revalidation.
+**Advisory rather than enforced.** Making the check optional means no capability negotiation and no promise that must hold across a fleet of servers. The consequence is that a successful response does not prove the versions matched. The main value for clients is comparing the versions in `server/discover` with those they cached, which tells them cheaply whether to re-list.
+
+**Independent of HTTP caching.** Versions identify definitions, while an ETag identifies an HTTP representation of a particular page. Keeping them separate lets this SEP work over any transport, and lets the [HTTP list retrieval](XXXX-http-list-retrieval-and-caching.md) proposal define ETags on its own terms.
+
+**Instructions alongside collections.** Instructions can change how a model uses otherwise unchanged tools, so they are versioned independently in the same structure.
 
 ## Backward Compatibility
 
-The change adds optional metadata and a defined error. Supporting a protocol revision containing this SEP does not require emitting digests or using conditional requests. Servers that do not opt in omit digests; clients that do not opt in can ignore them. Existing TTL caching and requests without `expectedDigest` continue unchanged.
-
-Older or non-participating servers may ignore unknown request metadata. Clients **MUST NOT** assume enforcement solely from a protocol version or from sending `expectedDigest`; they need a digest advertised under this mechanism. A deployment advertising digests must honor that promise across replicas handling conditional requests, rather than silently routing them to implementations that ignore the precondition.
+This SEP adds optional fields and does not change the behavior of existing requests. Clients can ignore response versions. Servers can ignore request hints, including after advertising versions. Implementations that do not recognize the new fields continue to work as they do today.
 
 ## Security Implications
 
-A digest does not grant access or preserve revoked permissions. Existing authorization and request-validation rules remain authoritative. Digests have the same confidentiality as their containing list results and are not proof of server integrity: unchanged definitions do not guarantee unchanged implementation behavior.
+A version carries the same confidentiality and authorization context as the definitions it describes. Versions grant no access. They also do not prove that a server's implementation is unchanged, only its advertised definitions. Operations continue to enforce current permissions regardless of the versions a client sends.
 
-## Reference Implementation and Conformance
+## Reference Implementation
 
-Reference implementation: TBD. A prototype and conformance scenarios are required before finalization.
+The [HF MCP server](https://github.com/huggingface/hf-mcp-server) has a prototype. It uses application `_meta` keys (`huggingface.co/definition-versions` and `huggingface.co/known-definition-versions`), versions tools and instructions, and rejects mismatches early. It does not change the SDK. The prototype sorts tools by name, includes each tool's own `_meta`, and hashes canonicalized JSON with SHA-256. Result-envelope metadata is excluded.
 
-Optional adoption must be tested: servers emitting no digests remain conformant, mixed lists may contain primitives with and without digests, and clients may ignore advertised digests. Feature-specific conformance scenarios apply to servers opting in and clients exercising conditional requests, not to non-participants.
+Client integration is still to be done.
 
-For participating implementations, tests should cover all four list types, deterministic hashes, `_meta` exclusion, independence from pagination and unrelated primitives, empty lists, resource/template targeting, matching and rejected requests, rejection before side effects, schema-validation ordering, refreshing within an unexpired TTL, new retry IDs, private cache scoping, and unchanged behavior when the request omits a digest. A server fixture may demonstrate honoring an older digest, but retaining older versions is not required.
+### Testing Plan
+
+Implementations should test:
+
+- Versions are deterministic, and change when definitions change.
+- Empty collections have versions, and absent instructions differ from empty instructions.
+- Versions are unaffected by ordering, pagination, and TTL.
+- Existing result metadata is preserved.
+- Versions are isolated between callers with different authorization contexts.
+- Requests are handled normally when hints are absent or ignored.
+- When checking is enabled, stale requests are rejected before any side effect.
+
+## Open Questions
+
+- Which response location to standardize: `_meta` or `CacheableResult`.
+- The canonicalization, and which definition fields a version covers (for example, whether a tool's own `_meta` is included).
+- Whether servers must provide a consistent snapshot across pages or may require clients to restart.
+- The standard error code and shape for a version mismatch.
