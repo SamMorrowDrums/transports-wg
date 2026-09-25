@@ -181,13 +181,15 @@ This SEP adds optional fields and does not change the behavior of existing reque
 
 A version carries the same confidentiality and authorization context as the definitions it describes, and a result carrying several versions is as private as the most private of them. For example, a tool list may be identical for many users while instructions name the individual user; a discovery result carrying both versions is then private to that user. Versions grant no access. They also do not prove that a server's implementation is unchanged, only its advertised definitions. Operations continue to enforce current permissions regardless of the versions a client sends.
 
+The same care applies to the cache scope of a result carrying versions. A result may be marked `public` only if every caller would receive the same result, not merely if it contains no user data. For example, an anonymous caller asking for the tool list might receive three tools, while a signed-in caller making the same request should receive five, because two of the tools require sign-in. The anonymous list contains no user data, but it is not public: if the two callers share a cache, the signed-in caller is served the shorter list without reaching the server, and their known versions then fail to match.
+
 ## Reference Implementation
 
 The [HF MCP server](https://github.com/huggingface/hf-mcp-server) has a prototype (not yet merged). It uses Option A with application keys, `huggingface.co/definition-versions` in results and `huggingface.co/known-definition-versions` in requests, and needs no SDK changes.
 
 - It versions tools and instructions, and checks known versions on `tools/call` only.
 - A mismatch is rejected before tool lookup, argument validation, or execution, with the application error code `-32987` (outside JSON-RPC's reserved range) and `data: { "stale": [...] }`. Unversioned targets and non-string hints are ignored.
-- Versions are offered only where the complete tool list is cheap to build: anonymous requests and requests for a named, fixed set of tools. Other requests get no versions, their hints are ignored, and they keep the existing single-tool fast path. Versioned results also carry TTL cache hints, `public` for anonymous requests and `private` otherwise.
+- Versions are offered only where the complete tool list is cheap to build: anonymous requests and requests for a named, fixed set of tools. Other requests get no versions, their hints are ignored, and they keep the existing single-tool fast path. Versioned results also carry `private` TTL cache hints; anonymous lists are not `public`, because they omit tools that require sign-in.
 - Tools are sorted by name, each tool's own `_meta` is included, and canonicalized JSON is hashed with SHA-256. Result-envelope metadata is excluded. For testing, a deploy-wide or runtime salt changes every version without changing definitions, forcing clients through the mismatch path.
 
 Client integration in [fast-agent](https://github.com/evalstate/fast-agent) is in progress. It is optimistic: it sends known versions with each call and refreshes definitions when a call is rejected.
