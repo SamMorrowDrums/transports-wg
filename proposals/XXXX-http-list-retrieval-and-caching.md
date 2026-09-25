@@ -5,7 +5,7 @@
 - **Created**: 2026-09-08
 - **Author(s)**: TBD
 - **Sponsor**: None
-- **Related**: SEP-2243 (HTTP Header Standardization), SEP-2549 (TTL for List Results), SEP-2127 (Server Card proposal), [per-primitive digests](XXXX-primitive-digests-companion.md)
+- **Related**: SEP-2243 (HTTP Header Standardization), SEP-2549 (TTL for List Results), SEP-2127 (Server Card proposal), [definition versions](XXXX-primitive-digests-companion.md)
 
 > Rough discussion draft. Endpoint syntax and discovery fields below are illustrative, not registered or agreed. Requirements describe a candidate design, not current MCP requirements.
 
@@ -26,7 +26,7 @@ This proposal covers only:
 - `resources/list`
 - `resources/templates/list`
 
-It does not expose arbitrary RPC methods through GET, cache tool execution, or define content caching for `resources/read`. Per-primitive digests protect definition-dependent execution; HTTP ETags validate a list-page representation. These are independent mechanisms.
+It does not expose arbitrary RPC methods through GET, cache tool execution, or define content caching for `resources/read`. Definition versions provide advisory change detection; HTTP ETags validate a list-page representation. These are independent mechanisms.
 
 ### Protocol cache identity versus HTTP validators
 
@@ -40,7 +40,7 @@ These mechanisms identify different things:
 
 A protocol-level list key that changes when list contents change is better described as a list validator. It is not automatically an HTTP ETag: an HTTP page representation may include pagination, metadata, or negotiated differences outside that validator's coverage. Reusing a protocol validator as an ETag requires explicitly defining its coverage and satisfying HTTP validator semantics.
 
-The per-primitive digest companion defines neither an aggregate list validator nor an HTTP page ETag. Its definition validators remain independent of both cache-key mechanisms.
+The definition-version companion identifies complete definition collections and server instructions, not HTTP page representations. Its advisory digests remain independent of both cache-key mechanisms.
 
 GET is needed here for integration with ordinary HTTP caching infrastructure, not for protocol-level caching itself. MCP-level caching already works over POST and STDIO; a separate protocol-level conditional-list mechanism could also work over those transports without GET.
 
@@ -103,7 +103,7 @@ ETag: "tools-page-v7"
 
 There is no request-specific JSON-RPC `id` to replay. The ordinary result schema, list visibility rules, and pagination semantics apply. For the same authorization and supported request context, GET and POST must describe the same list.
 
-Each page is independently cacheable and has its own validator. The ETag validates the selected page representation, including relevant metadata and pagination information, not merely the set of per-primitive digests. Strong and weak validators follow HTTP rules; neither is specified here as a particular hash algorithm. No cross-page snapshot guarantee is added.
+Each page is independently cacheable and has its own validator. The ETag validates the selected page representation, including relevant metadata and pagination information, not merely the definition collection digest. Strong and weak validators follow HTTP rules; neither is specified here as a particular hash algorithm. No cross-page snapshot guarantee is added.
 
 The GET path does not emit SSE or embedded requests for client input. HTTP errors are not cached under this initial profile; the exact error representation and a distinguishable "use POST" response remain to be defined. An authorization denial must never be interpreted as an empty list.
 
@@ -190,7 +190,7 @@ Relevant MCP list-change notifications invalidate the client's matching cached p
 - Unsupported retrieval mappings fall back to POST. Authorization failures are handled as authorization failures, not bypassed by trying another URL.
 - This changes Streamable HTTP's GET behavior only for explicitly selected list representations.
 - STDIO and other transports are unaffected.
-- This does not depend on or replace per-primitive digests, and defines no digest-header mirroring.
+- This does not depend on or replace definition versions, and defines no digest-header mirroring.
 - A full REST mapping of MCP, resource-content retrieval, cross-origin list hosting, and session-scoped GET caching are out of scope.
 
 ## Security considerations

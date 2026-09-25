@@ -41,6 +41,8 @@ Each collection version identifies the complete set of definitions the caller ca
 
 A version **MUST** be deterministic and collision-resistant. Adding, removing, or changing a definition changes the version. Ordering, page size, cursors, and TTL do not. An empty collection still has a version.
 
+A version **MAY** also change when the definitions have not, for example after a change to how versions are computed. Clients treat this like any other change and refresh.
+
 Clients **MUST** treat versions as opaque strings and compare them only for equality.
 
 The exact canonicalization and the definition fields a version covers are not yet specified (see [Open Questions](#open-questions)).
@@ -139,13 +141,21 @@ For example, the parameters of a `tools/call` request might look like this (othe
 
 Known versions are hints, not preconditions. A server **MAY** check the relevant versions on `tools/call`, `prompts/get`, or `resources/read`, or **MAY** ignore them. The instructions version is relevant to any of these operations. No capability flag is required.
 
+A server that checks known versions **SHOULD NOT** reject a request because it contains targets the server does not version or values that are not strings; it ignores them. Any string that does not equal the current version is treated as a mismatch.
+
 ### Rejecting stale requests
 
 A server that rejects a request because of a version mismatch **MUST** do so before operation-specific validation and before execution. That way a changed schema is reported as a stale definition, not as invalid arguments, and no side effects occur.
 
-The rejection is a JSON-RPC error. A standard error code needs to be allocated before this SEP is finalized; this draft does not propose a numeric code or an HTTP status.
+The rejection is a JSON-RPC error. Its `data` **SHOULD** list the stale targets, so the client knows what to refresh, and **MUST NOT** include the current versions:
 
-A client receiving this error **SHOULD** refresh the affected definitions and then decide whether the operation still makes sense. It **SHOULD NOT** blindly retry writes, and it **MUST NOT** copy a new version into its request without also fetching the definitions that version describes.
+```json
+{ "stale": ["tools"] }
+```
+
+A standard error code needs to be allocated before this SEP is finalized; this draft does not propose a numeric code or an HTTP status.
+
+A client receiving this error **SHOULD** refresh the affected definitions and then decide whether the operation still makes sense. Refreshing means fetching the definitions from the server: the client **MUST NOT** satisfy the refresh from a cached list, even one whose TTL has not expired. The client **SHOULD NOT** blindly retry writes, and it **MUST NOT** copy a new version into its request without also fetching the definitions that version describes.
 
 ### TTL and cache scope
 
@@ -192,4 +202,4 @@ Implementations should test:
 - Which response location to standardize: `_meta` or `CacheableResult`.
 - The canonicalization, and which definition fields a version covers (for example, whether a tool's own `_meta` is included).
 - Whether servers must provide a consistent snapshot across pages or may require clients to restart.
-- The standard error code and shape for a version mismatch.
+- The standard error code for a version mismatch.
