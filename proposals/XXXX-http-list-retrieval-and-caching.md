@@ -32,11 +32,11 @@ It does not expose arbitrary RPC methods through GET, cache tool execution, or d
 
 These mechanisms identify different things:
 
-| Mechanism | Identifies |
-| --- | --- |
+| Mechanism          | Identifies                                                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
 | Protocol cache key | A logical list result: server, method, parameters/cursor, authorization context, and other supported result-affecting context. |
-| HTTP cache key | A request's method and target URI, with representation variants selected through `Vary`. |
-| HTTP ETag | A version of the selected HTTP representation; it is a validator, not a cache key. |
+| HTTP cache key     | A request's method and target URI, with representation variants selected through `Vary`.                                       |
+| HTTP ETag          | A version of the selected HTTP representation; it is a validator, not a cache key.                                             |
 
 A protocol-level list key that changes when list contents change is better described as a list validator. It is not automatically an HTTP ETag: an HTTP page representation may include pagination, metadata, or negotiated differences outside that validator's coverage. Reusing a protocol validator as an ETag requires explicitly defining its coverage and satisfying HTTP validator semantics.
 
@@ -142,11 +142,11 @@ Authorization and representation selection happen **before** conditional validat
 
 The initial profile separates two cases:
 
-| Representation | Proposed HTTP policy |
-| --- | --- |
-| Caller-dependent or access-gated list | `private, max-age=N, must-revalidate` |
-| Explicitly public, safe for anonymous distribution | `public, max-age=N, must-revalidate` |
-| Representation that must not be stored | `no-store` |
+| Representation                                     | Proposed HTTP policy                  |
+| -------------------------------------------------- | ------------------------------------- |
+| Caller-dependent or access-gated list              | `private, max-age=N, must-revalidate` |
+| Explicitly public, safe for anonymous distribution | `public, max-age=N, must-revalidate`  |
+| Representation that must not be stored             | `no-store`                            |
 
 For fresh successful responses, `N` is no greater than `floor(ttlMs / 1000)`. Zero or absent TTL yields `max-age=0`; validators can still avoid retransmitting an unchanged body. A server may choose a stricter policy. This initial profile does not authorize stale serving after expiry, even where protocol-level caching would permit it.
 

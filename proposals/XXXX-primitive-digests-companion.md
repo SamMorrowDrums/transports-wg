@@ -115,7 +115,7 @@ When assembling a collection from several pages, a client **MUST NOT** combine p
 
 ### Sending known versions
 
-A client **MAY** send the versions it is working from in request `_meta`. The request shape is the same under either response option:
+A client **MAY** send the versions it is working from in request `_meta`. It **SHOULD** only send versions it received from the same server in the same authorization context, and omit the field otherwise. The request shape is the same under either response option:
 
 ```ts
 export interface RequestMetaObject extends MetaObject {
@@ -167,6 +167,8 @@ Definition versions do not change TTL or cache scope. A version does not renew a
 
 **Advisory rather than enforced.** Making the check optional means no capability negotiation and no promise that must hold across a fleet of servers. The consequence is that a successful response does not prove the versions matched. The main value for clients is comparing the versions in `server/discover` with those they cached, which tells them cheaply whether to re-list.
 
+**The cost of checking.** Checking a single request means computing the version of the whole collection, which can cost more than serving the request itself: a server that normally builds only the one tool being called must now build them all. Servers can limit this by advertising versions only where the complete collection is cheap to build, and ignoring hints elsewhere. Clients help by sending known versions only when they hold one, so unchecked requests keep their existing cost.
+
 **Independent of HTTP caching.** Versions identify definitions, while an ETag identifies an HTTP representation of a particular page. Keeping them separate lets this SEP work over any transport, and lets the [HTTP list retrieval](XXXX-http-list-retrieval-and-caching.md) proposal define ETags on its own terms.
 
 **Instructions alongside collections.** Instructions can change how a model uses otherwise unchanged tools, so they are versioned independently in the same structure.
@@ -177,13 +179,18 @@ This SEP adds optional fields and does not change the behavior of existing reque
 
 ## Security Implications
 
-A version carries the same confidentiality and authorization context as the definitions it describes. Versions grant no access. They also do not prove that a server's implementation is unchanged, only its advertised definitions. Operations continue to enforce current permissions regardless of the versions a client sends.
+A version carries the same confidentiality and authorization context as the definitions it describes, and a result carrying several versions is as private as the most private of them. For example, a tool list may be identical for many users while instructions name the individual user; a discovery result carrying both versions is then private to that user. Versions grant no access. They also do not prove that a server's implementation is unchanged, only its advertised definitions. Operations continue to enforce current permissions regardless of the versions a client sends.
 
 ## Reference Implementation
 
-The [HF MCP server](https://github.com/huggingface/hf-mcp-server) has a prototype. It uses application `_meta` keys (`huggingface.co/definition-versions` and `huggingface.co/known-definition-versions`), versions tools and instructions, and rejects mismatches early. It does not change the SDK. The prototype sorts tools by name, includes each tool's own `_meta`, and hashes canonicalized JSON with SHA-256. Result-envelope metadata is excluded.
+The [HF MCP server](https://github.com/huggingface/hf-mcp-server) has a prototype (not yet merged). It uses Option A with application keys, `huggingface.co/definition-versions` in results and `huggingface.co/known-definition-versions` in requests, and needs no SDK changes.
 
-Client integration is still to be done.
+- It versions tools and instructions, and checks known versions on `tools/call` only.
+- A mismatch is rejected before tool lookup, argument validation, or execution, with the application error code `-32987` (outside JSON-RPC's reserved range) and `data: { "stale": [...] }`. Unversioned targets and non-string hints are ignored.
+- Versions are offered only where the complete tool list is cheap to build: anonymous requests and requests for a named, fixed set of tools. Other requests get no versions, their hints are ignored, and they keep the existing single-tool fast path. Versioned results also carry TTL cache hints, `public` for anonymous requests and `private` otherwise.
+- Tools are sorted by name, each tool's own `_meta` is included, and canonicalized JSON is hashed with SHA-256. Result-envelope metadata is excluded. For testing, a deploy-wide or runtime salt changes every version without changing definitions, forcing clients through the mismatch path.
+
+Client integration in [fast-agent](https://github.com/evalstate/fast-agent) is in progress. It is optimistic: it sends known versions with each call and refreshes definitions when a call is rejected.
 
 ### Testing Plan
 
@@ -196,10 +203,12 @@ Implementations should test:
 - Versions are isolated between callers with different authorization contexts.
 - Requests are handled normally when hints are absent or ignored.
 - When checking is enabled, stale requests are rejected before any side effect.
+- Unversioned targets and malformed hints do not cause a rejection.
+- After a mismatch, the client refreshes from the server rather than from a still-fresh cached list.
 
 ## Open Questions
 
-- Which response location to standardize: `_meta` or `CacheableResult`.
+- Which response location to standardize: `_meta` or `CacheableResult`. The prototype shows Option A works with no SDK changes; Option B needs schema and SDK support.
 - The canonicalization, and which definition fields a version covers (for example, whether a tool's own `_meta` is included).
 - Whether servers must provide a consistent snapshot across pages or may require clients to restart.
 - The standard error code for a version mismatch.
