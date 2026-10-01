@@ -9,17 +9,30 @@
 
 ## Abstract
 
-This SEP lets servers label their tool, prompt, resource, and resource template lists, and their instructions, with a version string. Clients can send back the versions they are working from, and a server can use them to reject a request made against definitions that have since changed.
+This SEP lets MCP Servers supply a digest with their CacheableResults. 
 
-The mechanism is advisory. Servers choose whether to advertise versions and whether to check them. Clients choose whether to send them. There is no capability negotiation, no per-primitive versioning, and no HTTP mapping.
+Clients can return digests to the MCP Server, which can choose to reject the call if the digest is not serviceable. 
+
+The mechanism is advisory. Servers choose whether to advertise versions and what to do with the ones they receive.
+
+Extensions that define their own lists (`skills/list` for example) can participate using the same structure.
 
 ## Motivation
 
-A client that caches `tools/list` according to its `ttlMs` can keep calling tools after the server has changed them. The TTL is a freshness hint, not a promise that nothing will change before it expires. Definitions change for many reasons: a deployment, a permission change, a feature flag, or a user editing their settings. When this happens, the model may be working from a stale description, schema, or set of instructions.
+Hosts that cache Tool Lists can call tools after the Server has changed them. The `2026-07-28` specification `ttlMs` adds a "freshness hint, not a guarantee" and notes that:
 
-Sometimes ordinary validation catches the problem, for example when a required argument was added. Often it does not. A tool whose description changed, or whose behavior now depends on different instructions, can accept the old arguments and do something the model did not intend.
+> Servers MAY change the underlying data before TTL expires.
 
-List-change notifications help, but they need a stream the client may not hold, and they arrive asynchronously. Definition versions give clients a cheap way to ask "has anything changed?" and give servers a way to say "yes, refresh first" before doing any work.
+Tool definitions can change for may reasons; deployments, permissions, feature flags and user settings. Hosts can make tool call requests against stale schemas. Often standard validation will catch mismatches, but in pathological cases description and argument semantics may change and the model may issue tool calls that weren't intended.
+
+The digest mechanism provides three options for a Server:
+- **Ignore incoming digest:** Requests are handled using existing mechanisms as they are today.
+- **Handle Request:** The digest is used to select the appropriate response allowing graceful upgrades and task drains.
+- **Raise Error:** An error is returned indicating that the requested digest version is not available.
+
+*Authors note: "Handle Request" may be difficult or SDK dependent due to the need to handle multiple Request shapes for the same tool, prompt identity and so on.* 
+
+The mechanism works alongside the existing `ttlMs` hint. Clients may choose more aggressive caching strategies based on optimistic calling.
 
 ## Specification
 
@@ -34,10 +47,17 @@ export interface DefinitionVersions {
   resources?: string;
   resourceTemplates?: string;
   instructions?: string;
+  /**
+   * Collections defined by extensions. Keys follow the `_meta` naming rules
+   * and carry a mandatory prefix, for example "io.modelcontextprotocol/skills".
+   */
+  [extensionCollection: string]: string | undefined;
 }
 ```
 
 Each collection version identifies the complete set of definitions the caller can see, not a single page. The `resources` and `resourceTemplates` versions cover descriptors, not resource contents. The `instructions` version identifies the exact instructions text; absent instructions and empty instructions have different versions. An omitted field makes no claim about that collection.
+
+Unprefixed keys are reserved for collections defined by the core protocol. An extension that defines a list operation **SHOULD** say which key it uses here and carry that key's version on its list results. The skills extension is the obvious first case: `skills/list` already mirrors the base protocol's `ttlMs` and `cacheScope`, and would mirror this in the same way, under `io.modelcontextprotocol/skills`. A skills version covers the catalog entries, not the files they point to; those already carry their own digests.
 
 A version **MUST** be deterministic and collision-resistant. Adding, removing, or changing a definition changes the version. Ordering, page size, cursors, and TTL do not. An empty collection still has a version.
 
@@ -51,11 +71,7 @@ The exact canonicalization and the definition fields a version covers are not ye
 
 `server/discover` **MAY** advertise versions for any collection and for the instructions it returns. Each list response **MAY** carry the version of its collection. A server **MUST** compute versions in discovery using the same authorization and tool-selection context it uses for listing, so that the two agree.
 
-This SEP proposes one of two locations for the field. Only one will be standardized.
-
-#### Option A: result `_meta`
-
-A typed key is added to `ResultMetaObject`:
+Versions travel in result `_meta`, under a typed key on `ResultMetaObject`:
 
 ```ts
 export interface ResultMetaObject extends MetaObject {
@@ -78,44 +94,19 @@ export interface ResultMetaObject extends MetaObject {
 }
 ```
 
-This fits an experimental extension and works with existing metadata handling. The `io.modelcontextprotocol/` key is proposed, not allocated.
+This is the same pattern the draft schema already uses for `io.modelcontextprotocol/serverInfo` and `subscriptionId`: cross-cutting protocol data that any result can carry without a schema change to the result itself. It works today with existing SDKs, and it works for extension results such as `skills/list`, which are not in the core schema and could not inherit a new field from `CacheableResult` anyway. The `io.modelcontextprotocol/` key is proposed here and would be allocated on acceptance.
 
-#### Option B: a `CacheableResult` field
-
-```ts
-export interface CacheableResult extends Result {
-  ttlMs: number;
-  cacheScope: "public" | "private";
-  definitionVersions?: DefinitionVersions;
-}
-```
-
-```json
-{
-  "resultType": "complete",
-  "supportedVersions": ["2026-07-28"],
-  "capabilities": { "tools": {} },
-  "instructions": "Search before creating a repository.",
-  "ttlMs": 60000,
-  "cacheScope": "private",
-  "definitionVersions": {
-    "tools": "sha256:...",
-    "instructions": "sha256:..."
-  }
-}
-```
-
-This makes versions a first-class protocol field next to the existing freshness and sharing hints. The field identifies definitions, not the result that carries it. `resources/read` also returns a `CacheableResult`, but this SEP does not define a content version for it, and servers omit the field there.
+Conceptually the version belongs next to `ttlMs` and `cacheScope`. They say how long a result may be held and who may share it; the version says what it is. Once there is field experience, a follow-up **MAY** promote `definitionVersions` to a field on `CacheableResult`, keeping the `DefinitionVersions` type and its semantics unchanged. Servers would emit both for a transition period and clients would prefer the field. The main wrinkle is that `resources/read` also returns a `CacheableResult` and there is no content version to put there, so the field would always be omitted for it. That is a matter for the follow-up.
 
 ### Using versions on the client
 
-Clients **MUST** keep each version with the definitions it describes. Seeing a newer version in discovery does not relabel definitions that are already cached; it tells the client they are out of date.
+Clients **MUST** keep each version with the definitions it describes. Seeing a newer version in discovery does not relabel definitions that are already cached; it tells the client they are out of date. A `list_changed` notification says the same thing: a client that receives one **SHOULD** treat its cached version for that collection as stale, and a server that sends one **SHOULD** have changed the version too.
 
 When assembling a collection from several pages, a client **MUST NOT** combine pages that report different versions. It restarts from the first page instead. To make a consistent listing possible, a server can keep a snapshot for the duration of pagination or reject stale cursors.
 
 ### Sending known versions
 
-A client **MAY** send the versions it is working from in request `_meta`. It **SHOULD** only send versions it received from the same server in the same authorization context, and omit the field otherwise. The request shape is the same under either response option:
+A client **MAY** send the versions it is working from in request `_meta`. It **SHOULD** only send versions it received from the same server in the same authorization context, and omit the field otherwise. Versions are sent on each request rather than fixed for a session, because what the client is working from can change between one call and the next.
 
 ```ts
 export interface RequestMetaObject extends MetaObject {
@@ -139,21 +130,27 @@ For example, the parameters of a `tools/call` request might look like this (othe
 }
 ```
 
-Known versions are hints, not preconditions. A server **MAY** check the relevant versions on `tools/call`, `prompts/get`, or `resources/read`, or **MAY** ignore them. The instructions version is relevant to any of these operations. No capability flag is required.
+Known versions are hints, not preconditions. No capability flag is required, and the instructions version is relevant to any operation.
 
-A server that checks known versions **SHOULD NOT** reject a request because it contains targets the server does not version or values that are not strings; it ignores them. Any string that does not equal the current version is treated as a mismatch.
+### Handling known versions
 
-### Rejecting stale requests
+A server that receives known versions on `tools/call`, `prompts/get`, `resources/read`, or an extension's equivalent has three choices:
 
-A server that rejects a request because of a version mismatch **MUST** do so before operation-specific validation and before execution. That way a changed schema is reported as a stale definition, not as invalid arguments, and no side effects occur.
+- **Ignore them.** The request is handled exactly as it would be without hints. This is the default and is always allowed, including after the server has advertised versions.
+- **Honor them.** If the server still holds the definitions a known version describes, it **MAY** serve the request under those definitions. This is how a server drains an old definition set across a deployment, or lets a long-running task finish against the tools it started with. A successful response then means the old definitions ran, and the client should not assume otherwise until it refreshes and sends the new version.
+- **Reject them.** If a known version does not match and the server will not honor it, the server rejects the request as stale.
 
-The rejection is a JSON-RPC error. Its `data` **SHOULD** list the stale targets, so the client knows what to refresh, and **MUST NOT** include the current versions:
+Whatever it does, a server **SHOULD NOT** reject a request because it names targets the server does not version or carries values that are not strings; it ignores those. Any string that does not equal a version the server recognizes is a mismatch.
+
+A server that rejects a request for a version mismatch **MUST** do so before operation-specific validation and before execution. That way a changed schema is reported as a stale definition, not as invalid arguments, and no side effects occur.
+
+The rejection is a JSON-RPC error. Its `data` **SHOULD** list the stale targets, using the same keys as `DefinitionVersions`, so the client knows what to refresh. It **MUST NOT** include the current versions:
 
 ```json
-{ "stale": ["tools"] }
+{ "stale": ["tools", "io.modelcontextprotocol/skills"] }
 ```
 
-A standard error code needs to be allocated before this SEP is finalized; this draft does not propose a numeric code or an HTTP status.
+A standard error code needs to be allocated before this SEP is finalized; this draft does not propose a numeric code or an HTTP status. `UnsupportedProtocolVersionError` in the draft schema is the nearest model.
 
 A client receiving this error **SHOULD** refresh the affected definitions and then decide whether the operation still makes sense. Refreshing means fetching the definitions from the server: the client **MUST NOT** satisfy the refresh from a cached list, even one whose TTL has not expired. The client **SHOULD NOT** blindly retry writes, and it **MUST NOT** copy a new version into its request without also fetching the definitions that version describes.
 
@@ -163,9 +160,13 @@ Definition versions do not change TTL or cache scope. A version does not renew a
 
 ## Rationale
 
-**Collection versions instead of per-primitive versions.** An earlier draft attached a digest to every primitive and made the check mandatory. That design could not detect newly added primitives, and it required every replica behind an endpoint to honor any digest the server had advertised. One version per collection is simpler to compute and compare. It also covers additions and removals. The cost is coarseness: any change to a collection invalidates requests against it, even if the specific tool the client wants is unchanged.
+**Collection versions instead of per-primitive versions.** An earlier draft attached a digest to every primitive and made the check mandatory. That design could not detect newly added primitives, and it required every replica behind an endpoint to honor any digest the server had advertised. One version per collection is simpler to compute and compare. It also covers additions and removals. The cost is coarseness: any change to a collection invalidates requests against it, even if the specific tool the client wants is unchanged. Collection versions are still enough for draining, because a server that wants to honor an old version holds the whole old snapshot; it does not need a history per tool.
 
-**Advisory rather than enforced.** Making the check optional means no capability negotiation and no promise that must hold across a fleet of servers. The consequence is that a successful response does not prove the versions matched. The main value for clients is comparing the versions in `server/discover` with those they cached, which tells them cheaply whether to re-list.
+**Advisory rather than enforced.** Making the check optional means no capability negotiation and no promise that must hold across a fleet of servers. The consequence is that a successful response does not prove the versions matched, or that the current definitions were the ones that ran. Clients get two cheap things regardless: a way to compare the versions in `server/discover` against what they cached, and a way to tell the server what they are working from so that it can do something sensible with the information.
+
+**An open map.** The core protocol has five things worth versioning today, and extensions will add more; `skills/list` already exists and mirrors the base list caching fields. Letting extensions add prefixed keys to `DefinitionVersions` follows the pattern `capabilities.extensions` already uses, and means one structure, one request key, and one `stale` list cover everything, rather than each extension inventing its own.
+
+**`_meta` first.** The version conceptually belongs beside `ttlMs` and `cacheScope`, and may end up there. Starting in `_meta` lets the mechanism be tried against real servers and clients without a schema or SDK change, keeps the request and response sides symmetric (the request side has to be `_meta` in any case), and reaches extension results that a `CacheableResult` field would not.
 
 **The cost of checking.** Checking a single request means computing the version of the whole collection, which can cost more than serving the request itself: a server that normally builds only the one tool being called must now build them all. Servers can limit this by advertising versions only where the complete collection is cheap to build, and ignoring hints elsewhere. Clients help by sending known versions only when they hold one, so unchecked requests keep their existing cost.
 
@@ -185,7 +186,7 @@ The same care applies to the cache scope of a result carrying versions. A result
 
 ## Reference Implementation
 
-The [HF MCP server](https://github.com/huggingface/hf-mcp-server) has a prototype (not yet merged). It uses Option A with application keys, `huggingface.co/definition-versions` in results and `huggingface.co/known-definition-versions` in requests, and needs no SDK changes.
+The [HF MCP server](https://github.com/huggingface/hf-mcp-server) has a prototype (not yet merged). It uses result and request `_meta` with application keys, `huggingface.co/definition-versions` in results and `huggingface.co/known-definition-versions` in requests, and needs no SDK changes. It rejects on mismatch; it does not yet honor old versions.
 
 - It versions tools and instructions, and checks known versions on `tools/call` only.
 - A mismatch is rejected before tool lookup, argument validation, or execution, with the application error code `-32987` (outside JSON-RPC's reserved range) and `data: { "stale": [...] }`. Unversioned targets and non-string hints are ignored.
@@ -205,12 +206,15 @@ Implementations should test:
 - Versions are isolated between callers with different authorization contexts.
 - Requests are handled normally when hints are absent or ignored.
 - When checking is enabled, stale requests are rejected before any side effect.
-- Unversioned targets and malformed hints do not cause a rejection.
+- When honoring is enabled, a request carrying an old version runs against the old definitions, and one carrying an unknown version is rejected.
+- Unversioned targets, extension keys the server does not version, and malformed hints do not cause a rejection.
 - After a mismatch, the client refreshes from the server rather than from a still-fresh cached list.
 
 ## Open Questions
 
-- Which response location to standardize: `_meta` or `CacheableResult`. The prototype shows Option A works with no SDK changes; Option B needs schema and SDK support.
+- Whether, and when, to promote `definitionVersions` from `_meta` to a field on `CacheableResult`, and what to do about `resources/read` if so.
+- How long a server that honors old versions should keep them, and whether it should say so. This draft leaves it to the server.
+- How the skills extension (or any extension whose listing may be deliberately partial) should define its version, given that "the complete set the caller can see" is then the set the server chooses to enumerate.
 - The canonicalization, and which definition fields a version covers (for example, whether a tool's own `_meta` is included).
 - Whether servers must provide a consistent snapshot across pages or may require clients to restart.
 - The standard error code for a version mismatch.
